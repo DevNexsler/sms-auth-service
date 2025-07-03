@@ -1,0 +1,39 @@
+services:
+  # SMS Authentication Web Service
+  - type: web
+    name: sms-auth-service
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: oregon
+    healthCheckPath: /health
+    numInstances: 1
+    autoDeploy: true
+    envVars:
+      # Server Configuration
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        generateValue: true
+      
+      # Application URL (will be updated after deployment)
+      - key: APP_URL
+        value: https://sms-auth-service.onrender.com
+      
+      # Authentication Settings
+      - key: AUTH_SESSION_DURATION_DAYS
+        value: "7"
+      - key: AUTH_METHOD
+        value: magic_link
+      
+      # Webhook Configuration
+      - key: WEBHOOK_URL
+        value: https://sms-auth-service.onrender.com
+      
+      # The following must be set in Render Dashboard:
+      # - SUPABASE_URL
+      # - SUPABASE_ANON_KEY
+      # - SUPABASE_SERVICE_ROLE_KEY
+      # - TWILIO_ACCOUNT_SID
+      # - TWILIO_AUTH_TOKEN
+      # - TWILIO_PHONE_NUMBER

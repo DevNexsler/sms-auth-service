@@ -1,0 +1,33 @@
+{
+  "name": "sms-auth-service",
+  "version": "1.0.0",
+  "description": "SMS Authentication Service using Supabase and Twilio",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "node tests/test-auth-flow.js"
+  },
+  "keywords": [
+    "sms",
+    "authentication",
+    "supabase",
+    "twilio",
+    "express"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "twilio": "^5.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
