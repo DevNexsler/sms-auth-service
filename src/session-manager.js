@@ -74,7 +74,7 @@ class SessionManager {
    * Create or update session after successful authentication
    */
   async createSession(phoneNumber, email, userId, accessToken, authMethod = 'magic_link') {
-    const sessionDurationDays = parseInt(process.env.AUTH_SESSION_DURATION_DAYS) || 7;
+    const sessionDurationDays = parseInt(process.env.SESSION_DURATION_DAYS) || 7;
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + sessionDurationDays);
 
@@ -89,6 +89,9 @@ class SessionManager {
         authenticated_at: new Date().toISOString(),
         expires_at: expiresAt.toISOString(),
         auth_attempts: 0, // Reset on successful auth
+        session_duration_days: sessionDurationDays,
+        rcs_required: process.env.RCS_SECURITY_REQUIRED === 'true',
+        channel_downgrade_detected: false,
         updated_at: new Date().toISOString()
       }, {
         onConflict: 'phone_number'
@@ -104,6 +107,27 @@ class SessionManager {
     // Update cache
     this.sessionCache.set(phoneNumber, session);
     return session;
+  }
+
+  /**
+   * Upsert session with RCS requirements (for initial auth request)
+   */
+  async upsertSession(phoneNumber, email, authMethod = 'magic_link', rcsRequired = true, sessionDurationDays = 7) {
+    try {
+      const { data, error } = await this.supabase.rpc('upsert_sms_session', {
+        p_phone_number: phoneNumber,
+        p_email: email,
+        p_auth_method: authMethod,
+        p_rcs_required: rcsRequired,
+        p_session_duration_days: sessionDurationDays
+      });
+
+      if (error) throw error;
+      return data;
+    } catch (error) {
+      console.error('Upsert session error:', error);
+      throw error;
+    }
   }
 
   /**

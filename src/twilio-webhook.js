@@ -6,7 +6,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const twilio = require('twilio');
 const SessionManager = require('./session_manager');
-const { sendSMS } = require('./sms_helper');
+const { sendSMS } = require('./rcs-helper');
 
 // Initialize Supabase client
 const supabase = createClient(
@@ -18,7 +18,7 @@ const supabase = createClient(
 const sessionManager = new SessionManager(supabase);
 
 /**
- * Main webhook handler for Twilio SMS
+ * Main webhook handler for Twilio SMS/RCS
  */
 async function handleTwilioWebhook(req, res) {
   try {
@@ -27,8 +27,14 @@ async function handleTwilioWebhook(req, res) {
       return res.status(403).json({ error: 'Invalid signature' });
     }
 
-    const { From: phoneNumber, Body: message, MessageSid } = req.body;
-    console.log(`Received SMS from ${phoneNumber}: ${message}`);
+    const { 
+      From: phoneNumber, 
+      Body: message, 
+      MessageSid,
+      ChannelPrefix // RCS, SM, or MM
+    } = req.body;
+    
+    console.log(`Received ${ChannelPrefix || 'SMS'} from ${phoneNumber}: ${message}`);
 
     // Normalize phone number to E.164 format
     const normalizedPhone = normalizePhoneNumber(phoneNumber);
@@ -36,6 +42,12 @@ async function handleTwilioWebhook(req, res) {
 
     // Check for existing session
     const session = await sessionManager.getSession(normalizedPhone);
+
+    // Check for channel downgrade
+    if (session?.rcs_required && session?.channel_type === 'RCS' && ChannelPrefix !== 'RCS') {
+      await handleSecurityDowngrade(normalizedPhone);
+      return res.status(200).send('OK');
+    }
 
     // Route to appropriate handler
     if (isAuthCommand(normalizedMessage)) {
@@ -45,7 +57,7 @@ async function handleTwilioWebhook(req, res) {
     } else if (isLogoutCommand(normalizedMessage)) {
       await handleLogout(normalizedPhone);
     } else if (session && new Date(session.expires_at) > new Date()) {
-      await handleAuthenticatedRequest(normalizedPhone, message, session);
+      await handleAuthenticatedRequest(normalizedPhone, message, session, ChannelPrefix);
     } else {
       await handleUnauthenticatedRequest(normalizedPhone, message);
     }
@@ -73,7 +85,7 @@ function verifyTwilioSignature(req) {
 }
 
 /**
- * Handle authentication request
+ * Handle authentication request with RCS channel awareness
  */
 async function handleAuthRequest(phoneNumber, existingSession) {
   try {
@@ -97,74 +109,46 @@ async function handleAuthRequest(phoneNumber, existingSession) {
       );
     }
 
-    // Record authentication attempt
-    await sessionManager.recordAuthAttempt(phoneNumber, email);
+    // Get RCS settings
+    const rcsRequired = process.env.RCS_SECURITY_REQUIRED === 'true';
+    const sessionDuration = parseInt(process.env.SESSION_DURATION_DAYS) || 7;
 
-    // Determine auth method from environment or session
-    const authMethod = process.env.AUTH_METHOD || 'magic_link';
+    // Create or update session with RCS requirements
+    await sessionManager.upsertSession(phoneNumber, email, 'magic_link', rcsRequired, sessionDuration);
 
-    if (authMethod === 'otp') {
-      // Send OTP
-      const { data, error } = await supabase.auth.signInWithOtp({
-        email: email,
-        options: {
-          shouldCreateUser: false
-        }
-      });
-
-      if (error) {
-        console.error('OTP generation error:', error);
-        return await sendSMS(phoneNumber,
-          "❌ Authentication failed. Please try again later."
-        );
+    // Send magic link via email (primary authentication method)
+    const { data, error } = await supabase.auth.signInWithOtp({
+      email: email,
+      options: {
+        shouldCreateUser: false,
+        emailRedirectTo: `${process.env.APP_URL}/api/auth/callback?phone=${encodeURIComponent(phoneNumber)}`
       }
+    });
 
-      // Store auth method in session
-      await supabase
-        .from('sms_sessions')
-        .upsert({
-          phone_number: phoneNumber,
-          email: email,
-          auth_method: 'otp',
-          updated_at: new Date().toISOString()
-        });
-
+    if (error) {
+      console.error('Magic link error:', error);
       return await sendSMS(phoneNumber,
-        `📧 Check your email! We've sent a 6-digit code to ${maskEmail(email)}. ` +
-        "Reply with the code to complete authentication."
-      );
-    } else {
-      // Send magic link
-      const { data, error } = await supabase.auth.signInWithOtp({
-        email: email,
-        options: {
-          shouldCreateUser: false,
-          emailRedirectTo: `${process.env.APP_URL}/api/auth/callback`
-        }
-      });
-
-      if (error) {
-        console.error('Magic link error:', error);
-        return await sendSMS(phoneNumber,
-          "❌ Authentication failed. Please try again later."
-        );
-      }
-
-      // Store auth method in session
-      await supabase
-        .from('sms_sessions')
-        .upsert({
-          phone_number: phoneNumber,
-          email: email,
-          auth_method: 'magic_link',
-          updated_at: new Date().toISOString()
-        });
-
-      return await sendSMS(phoneNumber,
-        `✉️ Check your email! We've sent a magic link to ${maskEmail(email)}. ` +
-        "Click the link to complete authentication."
+        "❌ Authentication failed. Please try again later."
       );
     }
+
+    // Send RCS notification about email with status callback
+    const message = await sendMessageWithChannelTracking(phoneNumber,
+      `🔐 Authentication email sent!\n\n` +
+      `Check ${maskEmail(email)} for your magic link.\n\n` +
+      `This secure session will last ${sessionDuration} days.`
+    );
+
+    // Store message SID for channel tracking
+    await supabase
+      .from('sms_sessions')
+      .update({
+        last_message_sid: message.sid,
+        updated_at: new Date().toISOString()
+      })
+      .eq('phone_number', phoneNumber);
+
+    return message;
   } catch (error) {
     console.error('Authentication error:', error);
     return await sendSMS(phoneNumber,
@@ -236,10 +220,15 @@ async function handleLogout(phoneNumber) {
 }
 
 /**
- * Handle authenticated request
+ * Handle authenticated request with RCS channel verification
  */
-async function handleAuthenticatedRequest(phoneNumber, message, session) {
+async function handleAuthenticatedRequest(phoneNumber, message, session, channelPrefix) {
   try {
+    // Check for RCS security requirement
+    if (session.rcs_required && channelPrefix !== 'RCS') {
+      return await handleSecurityDowngrade(phoneNumber);
+    }
+
     // Get user context with RBAC info
     const userContext = await sessionManager.getUserContext(phoneNumber);
     
@@ -254,7 +243,8 @@ async function handleAuthenticatedRequest(phoneNumber, message, session) {
     // For now, we'll just echo back with user info
     const response = await processAIRequest(message, userContext);
     
-    return await sendSMS(phoneNumber, response);
+    // Send response with channel tracking
+    return await sendMessageWithChannelTracking(phoneNumber, response);
   } catch (error) {
     console.error('Request processing error:', error);
     return await sendSMS(phoneNumber,
@@ -347,9 +337,87 @@ function maskEmail(email) {
   return `${maskedLocal}@${domain}`;
 }
 
+/**
+ * Send message with channel tracking
+ */
+async function sendMessageWithChannelTracking(phoneNumber, message) {
+  try {
+    const result = await sendSMS(phoneNumber, message, {
+      statusCallback: `${process.env.APP_URL}/api/twilio/status-callback`
+    });
+    
+    return result;
+  } catch (error) {
+    console.error('Message send error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Handle security downgrade from RCS to SMS
+ */
+async function handleSecurityDowngrade(phoneNumber) {
+  try {
+    // Mark session as compromised
+    await supabase
+      .from('sms_sessions')
+      .update({ 
+        channel_downgrade_detected: true,
+        authenticated_at: null,
+        session_token: null,
+        expires_at: null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('phone_number', phoneNumber);
+    
+    // Notify user
+    return await sendSMS(phoneNumber,
+      "⚠️ Secure RCS channel unavailable.\n\n" +
+      "For your security, this conversation has been paused.\n\n" +
+      "To continue:\n" +
+      "• Android: Messages → Settings → Chat features → Enable\n" +
+      "• iPhone: Settings → Messages → RCS → Enable\n\n" +
+      `Learn more: ${process.env.RCS_SETUP_URL || process.env.APP_URL + '/rcs-setup'}`
+    );
+  } catch (error) {
+    console.error('Security downgrade handling error:', error);
+  }
+}
+
+/**
+ * Handle status callback for channel detection
+ */
+async function handleStatusCallback(req, res) {
+  try {
+    const { 
+      MessageSid, 
+      MessageStatus, 
+      ChannelPrefix,
+      To
+    } = req.body;
+    
+    console.log(`Status callback: ${MessageSid} - ${MessageStatus} via ${ChannelPrefix}`);
+    
+    // Update channel type in database
+    if (ChannelPrefix) {
+      await supabase.rpc('update_channel_type', {
+        p_message_sid: MessageSid,
+        p_channel_prefix: ChannelPrefix
+      });
+    }
+    
+    res.sendStatus(200);
+  } catch (error) {
+    console.error('Status callback error:', error);
+    res.sendStatus(500);
+  }
+}
+
 module.exports = {
   handleTwilioWebhook,
   handleAuthRequest,
   handleOTPVerification,
-  handleAuthenticatedRequest
+  handleAuthenticatedRequest,
+  handleStatusCallback,
+  handleSecurityDowngrade
 };

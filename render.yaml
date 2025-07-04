@@ -1,7 +1,7 @@
 services:
-  # SMS Authentication Web Service
+  # RCS Authentication Web Service
   - type: web
-    name: sms-auth-service
+    name: rcs-auth-service
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: starter
@@ -18,17 +18,19 @@ services:
       
       # Application URL (will be updated after deployment)
       - key: APP_URL
-        value: https://sms-auth-service.onrender.com
+        value: https://rcs-auth-service.onrender.com
       
       # Authentication Settings
-      - key: AUTH_SESSION_DURATION_DAYS
+      - key: SESSION_DURATION_DAYS
         value: "7"
-      - key: AUTH_METHOD
-        value: magic_link
+      - key: RCS_SECURITY_REQUIRED
+        value: "true"
+      - key: ALLOW_SMS_INITIAL_CONTACT
+        value: "true"
       
-      # Webhook Configuration
-      - key: WEBHOOK_URL
-        value: https://sms-auth-service.onrender.com
+      # RCS Setup URL
+      - key: RCS_SETUP_URL
+        value: https://rcs-auth-service.onrender.com/rcs-setup
       
       # The following must be set in Render Dashboard:
       # - SUPABASE_URL
@@ -37,3 +39,5 @@ services:
       # - TWILIO_ACCOUNT_SID
       # - TWILIO_AUTH_TOKEN
       # - TWILIO_PHONE_NUMBER
+      # - MESSAGING_SERVICE_SID
+      # - RCS_SENDER_ID (optional until RCS is approved)
